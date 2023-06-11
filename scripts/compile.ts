@@ -4,7 +4,9 @@ import { CompilerOutput, CompilerInput, compileStandardWrapper, CompilerOutputCo
 import { rlpEncode } from '@zoltu/rlp-encoder'
 import { keccak256 } from 'js-sha3'
 import { ec as EllipticCurve } from 'elliptic'
+
 const secp256k1 = new EllipticCurve('secp256k1')
+import {genSignature} from './genSignature'
 
 export async function ensureDirectoryExists(absoluteDirectoryPath: string) {
 	try {
@@ -74,22 +76,32 @@ async function writeBytecode(bytecode: string) {
 
 async function writeFactoryDeployerTransaction(contract: CompilerOutputContract) {
 	const deploymentGas = 100000 // actual gas costs last measure: 59159; we don't want to run too close though because gas costs can change in forks and we want our address to be retained
+	const deploymentGasPrice = 100*10**9
 	const deploymentBytecode = contract.evm.bytecode.object
 
+	let sigCfg = await genSignature(
+		deploymentGas,
+		deploymentGasPrice,
+		'0x'+deploymentBytecode)
+
+	console.log('genSignature', sigCfg)
+
 	const nonce = new Uint8Array(0)
-	const gasPrice = arrayFromNumber(100*10**9)
+	const gasPrice = arrayFromNumber(deploymentGasPrice)
 	const gasLimit = arrayFromNumber(deploymentGas)
 	const to = new Uint8Array(0)
 	const value = new Uint8Array(0)
 	const data = arrayFromHexString(deploymentBytecode)
-	const v = arrayFromNumber(27)
-	const r = arrayFromHexString('2222222222222222222222222222222222222222222222222222222222222222')
-	const s = arrayFromHexString('2222222222222222222222222222222222222222222222222222222222222222')
 
-	const unsignedEncodedTransaction = rlpEncode([nonce, gasPrice, gasLimit, to, value, data])
+	const v = arrayFromNumber(sigCfg.v)
+	const r = arrayFromHexString(sigCfg.r)
+	const s = arrayFromHexString(sigCfg.s)
+
+	const unsignedEncodedTransaction = rlpEncode([nonce, gasPrice, gasLimit, to, value, data, arrayFromNumber(sigCfg.chainId),new Uint8Array(0), new Uint8Array(0)])
 	const signedEncodedTransaction = rlpEncode([nonce, gasPrice, gasLimit, to, value, data, v, r, s])
 	const hashedSignedEncodedTransaction = new Uint8Array(keccak256.arrayBuffer(unsignedEncodedTransaction))
-	const signerAddress = arrayFromHexString(keccak256(secp256k1.recoverPubKey(hashedSignedEncodedTransaction, { r: r, s: s}, 0).encode('array').slice(1)).slice(-40))
+
+	const signerAddress = arrayFromHexString(keccak256(secp256k1.recoverPubKey(hashedSignedEncodedTransaction, { r: r, s: s}, sigCfg.oddFlag ).encode('array').slice(1)).slice(-40))
 	const contractAddress = arrayFromHexString(keccak256(rlpEncode([signerAddress, nonce])).slice(-40))
 
 	const filePath = path.join(__dirname, '../output/deployment.json')
@@ -98,7 +110,8 @@ async function writeFactoryDeployerTransaction(contract: CompilerOutputContract)
 	"gasLimit": ${deploymentGas},
 	"signerAddress": "${signerAddress.reduce((x,y)=>x+=y.toString(16).padStart(2, '0'), '')}",
 	"transaction": "${signedEncodedTransaction.reduce((x,y)=>x+=y.toString(16).padStart(2, '0'), '')}",
-	"address": "${contractAddress.reduce((x,y)=>x+=y.toString(16).padStart(2, '0'), '')}"
+	"address": "${contractAddress.reduce((x,y)=>x+=y.toString(16).padStart(2, '0'), '')}",
+	"chainId": ${sigCfg.chainId}
 }
 `
 	await filesystem.writeFile(filePath, fileContents, { encoding: 'utf8', flag: 'w' })
@@ -123,3 +136,4 @@ function arrayFromHexString(value: string): Uint8Array {
 	}
 	return new Uint8Array(bytes)
 }
+
